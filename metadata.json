@@ -1,0 +1,6 @@
+{
+  "name": "CVForge AI",
+  "description": "An AI-powered SaaS application for generating premium, ATS-optimised resumes and custom cover letters.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

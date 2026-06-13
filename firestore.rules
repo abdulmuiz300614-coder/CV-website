@@ -1,0 +1,144 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // First Rule Gate: Global safety net
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // Helper functions
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isOwner(userId) {
+      return isSignedIn() && request.auth.uid == userId;
+    }
+
+    function isAdmin() {
+      return isSignedIn() && exists(/databases/$(database)/documents/admins/$(request.auth.uid));
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    // Validation schemas
+    function isValidUserAccount(data) {
+      return data.keys().hasAll(['email', 'displayName', 'plan'])
+        && data.email is string && data.email.size() <= 128
+        && data.displayName is string && data.displayName.size() <= 256
+        && data.plan is string && (data.plan == 'free' || data.plan == 'pro');
+    }
+
+    function isValidResumeDocument(data) {
+      return data.keys().hasAll(['id', 'title', 'templateType', 'updatedAt', 'userId', 'data'])
+        && data.id is string && data.id.size() <= 128
+        && data.title is string && data.title.size() <= 256
+        && data.templateType is string && data.templateType.size() <= 64
+        && data.updatedAt is string && data.updatedAt.size() <= 128
+        && data.userId is string && data.userId.size() <= 128
+        && data.userId == request.auth.uid;
+    }
+
+    function isValidCoverLetterDocument(data) {
+      return data.keys().hasAll(['id', 'title', 'companyName', 'jobDescription', 'tone', 'generatedContent', 'updatedAt', 'userId'])
+        && data.id is string && data.id.size() <= 128
+        && data.title is string && data.title.size() <= 256
+        && data.companyName is string && data.companyName.size() <= 256
+        && data.jobDescription is string && data.jobDescription.size() <= 5000
+        && data.tone is string && data.tone.size() <= 64
+        && data.generatedContent is string && data.generatedContent.size() <= 10000
+        && data.updatedAt is string && data.updatedAt.size() <= 128
+        && data.userId is string && data.userId.size() <= 128
+        && data.userId == request.auth.uid;
+    }
+
+    function isValidFeedbackItem(data) {
+      return data.keys().hasAll(['id', 'email', 'category', 'message', 'timestamp', 'status'])
+        && data.id is string && data.id.size() <= 128
+        && data.email is string && data.email.size() <= 128
+        && data.category is string && (data.category == 'feature' || data.category == 'bug' || data.category == 'other')
+        && data.message is string && data.message.size() <= 5000
+        && data.timestamp is string && data.timestamp.size() <= 128
+        && data.status is string && (data.status == 'pending' || data.status == 'resolved');
+    }
+
+    function isValidActivityLog(data) {
+      return data.keys().hasAll(['id', 'type', 'details', 'timestamp', 'userId'])
+        && data.id is string && data.id.size() <= 128
+        && data.type is string && data.type.size() <= 64
+        && data.details is string && data.details.size() <= 1024
+        && data.timestamp is string && data.timestamp.size() <= 128
+        && data.userId is string && data.userId.size() <= 128
+        && data.userId == request.auth.uid;
+    }
+
+    // Collection Security Match Blocks
+
+    // USERS COLLECTION
+    match /users/{userId} {
+      allow get: if isOwner(userId) || isAdmin();
+      allow list: if isAdmin();
+      allow create: if isOwner(userId) && isValidUserAccount(incoming()) && incoming().plan == 'free';
+      allow update: if isOwner(userId) && isValidUserAccount(incoming()) && (
+        // Action: Self update profile details
+        (incoming().diff(existing()).affectedKeys().hasOnly(['displayName', 'resumesCount', 'lettersCount', 'aiTokensUsed']) && incoming().plan == existing().plan) ||
+        // Action: Admin upgrades plan or updates profile
+        (isAdmin() && incoming().diff(existing()).affectedKeys().hasAny(['plan']))
+      );
+      allow delete: if isAdmin();
+    }
+
+    // RESUMES COLLECTION
+    match /resumes/{resumeId} {
+      allow get: if isSignedIn() && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isValidId(resumeId) && isValidResumeDocument(incoming());
+      allow update: if isSignedIn() && existing().userId == request.auth.uid && isValidResumeDocument(incoming()) && (
+        incoming().diff(existing()).affectedKeys().hasOnly(['title', 'templateType', 'updatedAt', 'data'])
+      );
+      allow delete: if isSignedIn() && existing().userId == request.auth.uid;
+    }
+
+    // COVER LETTERS COLLECTION
+    match /coverLetters/{letterId} {
+      allow get: if isSignedIn() && existing().userId == request.auth.uid;
+      allow list: if isSignedIn() && resource.data.userId == request.auth.uid;
+      allow create: if isValidId(letterId) && isValidCoverLetterDocument(incoming());
+      allow update: if isSignedIn() && existing().userId == request.auth.uid && isValidCoverLetterDocument(incoming()) && (
+        incoming().diff(existing()).affectedKeys().hasOnly(['title', 'companyName', 'hiringManager', 'jobDescription', 'tone', 'generatedContent', 'updatedAt'])
+      );
+      allow delete: if isSignedIn() && existing().userId == request.auth.uid;
+    }
+
+    // FEEDBACKS COLLECTION (System feedback)
+    match /feedbacks/{feedbackId} {
+      allow get: if isAdmin();
+      allow list: if isAdmin();
+      allow create: if isSignedIn() && isValidFeedbackItem(incoming()) && incoming().status == 'pending';
+      allow update: if isAdmin() && isValidFeedbackItem(incoming()) && (
+        incoming().diff(existing()).affectedKeys().hasOnly(['status'])
+      );
+      allow delete: if isAdmin();
+    }
+
+    // ACTIVITIES COLLECTION (Activity Audit log)
+    match /activities/{activityId} {
+      allow get: if isSignedIn() && existing().userId == request.auth.uid;
+      allow list: if (isSignedIn() && resource.data.userId == request.auth.uid) || isAdmin();
+      allow create: if isValidId(activityId) && isValidActivityLog(incoming());
+      allow update: if false; // Logs are immutable once written!
+      allow delete: if isAdmin();
+    }
+  }
+}
